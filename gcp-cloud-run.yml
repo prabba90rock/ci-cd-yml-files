@@ -1,0 +1,45 @@
+name: Deploy to GCP Cloud Run SG dev
+
+on:
+  push:
+    branches:
+    - main
+
+env:
+  IMAGE_NAME: gcr.io/GCR_LINK
+
+jobs:
+  setup-build-deploy:
+    name: Setup, Build, and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Genarate .env
+      run: |
+        envsubst "`printf '${%s} ' $(sh -c "env|cut -d'=' -f1")`" < ./.env.example.staging > ./.env
+        echo "$(cat ./.env)"
+      env:
+        PORT: 3000
+        API_VERSION: 1.0
+
+    - name: Login
+      uses: google-github-actions/setup-gcloud@v0
+      with:
+        project_id: ${{ secrets.GCP_CLOUD_RUN_PROJECT }}
+        service_account_email: ${{ secrets.GCP_CLOUD_RUN_EMAIL }}
+        service_account_key: ${{ secrets.GCP_CLOUD_RUN_ACC_CREDENTIALS }}
+
+    - name: Configure Docker
+      run: gcloud auth configure-docker --quiet
+
+    - name: Build Docker image
+      run: docker build . -t $IMAGE_NAME:${{ github.sha }}
+
+    - name: Push Docker image
+      run: docker push $IMAGE_NAME:${{ github.sha }}
+
+    - name: Deploy Docker image
+      run: gcloud run deploy CLOUD_RUN_NAME --image $IMAGE_NAME:${{ github.sha }} --region asia-east2 --platform managed

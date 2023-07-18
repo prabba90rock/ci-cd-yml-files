@@ -1,0 +1,102 @@
+name: project-name staging
+
+on:
+  push:
+    branches:
+      - staging
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v1
+
+    - name: Genarate .env
+      run: |
+        envsubst "`printf '${%s} ' $(sh -c "env|cut -d'=' -f1")`" < ./environments/example.env > ./environments/staging.env
+        echo "$(cat ./environments/staging.env)"
+      env:
+        NODE_ENV: staging
+        APP_ENV: staging
+
+        TYPEORM_HOST: ${{ secrets.HOST }}
+        TYPEORM_USERNAME: postgres
+        TYPEORM_PASSWORD: ${{ secrets.STG_TYPEORM_PASSWORD }}
+        TYPEORM_DATABASE: ${{ secrets.DATABASE }}
+
+        REDIS_HOST: redis-staging.local
+        BULL_REDIS_HOST: redis-staging.local
+        SOCKET_ADAPTER_REDIS_HOST: redis-staging.local
+
+        AWS_S3_SECRET: ${{ secrets.STG_AWS_S3_SECRET }}
+        AWS_S3_KEY: ${{ secrets.STG_AWS_S3_KEY }}
+        AWS_S3_ENDPOINT: ${{ secrets.S3_URL }}
+        AWS_S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        AWS_S3_DEFAULT_PERMISSION: public-read
+
+        APP_KEY: iha07yjhgj786ghjgjhqwae8y979987uiyuhkjhwdqjgduqyd7y7dwqdww
+
+
+    # - name: Docgen
+    #   run: |
+    #     wget https://github.com/thedevsaddam/docgen-bin/raw/master/v2.4/linux_386.zip
+    #     unzip linux_386.zip
+    #     ./docgen build -i ./docs/postman_collection.json -o ./public/docs/index.html
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-south-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: ecr-repo
+        IMAGE_TAG: ${{ github.sha }}
+        NODE_OPTIONS: "--max-old-space-size=8192"
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+    - name: Fill in the new image ID in the Amazon ECS task definition - migration
+      id: task-def-migration
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: task-definition-migration-staging.json
+        container-name: container-name
+        image: ${{ steps.build-image.outputs.image }}
+
+    - name: Run migration with ECS Fargate task
+      id: run-migration
+      env:
+        TASK_DEF_PATH: ${{ steps.task-def-migration.outputs.task-definition }}
+      run: |
+        aws ecs register-task-definition --cli-input-json file://$TASK_DEF_PATH
+        aws ecs run-task --cluster  --task-definition  --launch-type "FARGATE" --network-configuration "awsvpcConfiguration={subnets=[subnet-0d430779cf4f150c5],securityGroups=[sg-0368da01448f8ca08],assignPublicIp=ENABLED}"
+
+    - name: Fill in the new image ID in the Amazon ECS task definition
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: task-definition-staging-serverless.json
+        container-name: app
+        image: ${{ steps.build-image.outputs.image }}
+
+    - name: Deploy Amazon ECS task definition
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        task-definition: ${{ steps.task-def.outputs.task-definition }}
+        service: 
+        cluster: 
+        wait-for-service-stability: true
